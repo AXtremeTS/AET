@@ -527,3 +527,18 @@ tr:nth-child(even) {
   animation: entrance-animate 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
   width: 100%;
 }
+
+@keyframes slideDownFade {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.tags-dropdown {
+  animation: slideDownFade 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

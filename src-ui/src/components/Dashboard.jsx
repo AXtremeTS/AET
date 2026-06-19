@@ -176,7 +176,10 @@ export default function Dashboard() {
 
   // Search/Filter states for logs
   const [searchQuery, setSearchQuery] = useState('');
-  const [opFilter, setOpFilter] = useState('ALL');
+  const [tagStates, setTagStates] = useState({ CREATE: 0, MODIFY: 0, DELETE: 0 }); // 0: off, 1: include, -1: exclude
+  const [showTagsMenu, setShowTagsMenu] = useState(false);
+  const [procSortBy, setProcSortBy] = useState('usage');
+  const [showProcSortMenu, setShowProcSortMenu] = useState(false);
   const [collapsedNodes, setCollapsedNodes] = useState(new Set());
   const [expandedNodes, setExpandedNodes] = useState(new Set());
 
@@ -624,8 +627,14 @@ export default function Dashboard() {
   const filteredEvents = baseEvents.filter(e => {
     const matchesSearch = e.file_path.toLowerCase().includes(searchQuery.toLowerCase()) || 
                           (e.process_name && e.process_name.toLowerCase().includes(searchQuery.toLowerCase()));
-    const matchesOp = opFilter === 'ALL' || e.operation_type === opFilter;
-    return matchesSearch && matchesOp;
+    const includes = Object.keys(tagStates).filter(k => tagStates[k] === 1);
+    const excludes = Object.keys(tagStates).filter(k => tagStates[k] === -1);
+    const isOpMatch = () => {
+      if (excludes.includes(e.operation_type)) return false;
+      if (includes.length > 0 && !includes.includes(e.operation_type)) return false;
+      return true;
+    };
+    return matchesSearch && isOpMatch();
   });
 
   const filteredRunningProcesses = runningProcesses.filter(p => 
@@ -1288,6 +1297,70 @@ export default function Dashboard() {
                   {renderedPanel === 'cpu' ? '[+] PROCESS MONITOR - SORT BY CPU' : '[+] PROCESS MONITOR - SORT BY RAM'}
                 </span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ position: 'relative' }}>
+                    <button
+                      className="btn-tui"
+                      onClick={() => { playSfx('click'); setShowProcSortMenu(!showProcSortMenu); }}
+                      style={{ padding: '2px 8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
+                        <line x1="7" y1="7" x2="7.01" y2="7"></line>
+                      </svg>
+                      SORT
+                    </button>
+                    {showProcSortMenu && (
+                      <div className="tags-dropdown" style={{
+                        position: 'absolute',
+                        top: '100%',
+                        left: '50%',
+                        marginTop: '8px',
+                        backgroundColor: 'var(--color-surface-elevated)',
+                        border: '1px solid var(--color-hairline)',
+                        borderRadius: '4px',
+                        padding: '8px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px',
+                        zIndex: 100,
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                        minWidth: '120px'
+                      }}>
+                        <button
+                          className="btn-tui"
+                          onClick={() => {
+                            playSfx('click');
+                            setProcSortBy('name');
+                          }}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: '11px',
+                            borderColor: procSortBy === 'name' ? 'var(--color-success)' : 'var(--color-hairline-strong)',
+                            color: procSortBy === 'name' ? 'var(--color-success)' : 'var(--color-mute)',
+                            textAlign: 'left'
+                          }}
+                        >
+                          {procSortBy === 'name' ? '[+] BY NAME' : '[ ] BY NAME'}
+                        </button>
+                        <button
+                          className="btn-tui"
+                          onClick={() => {
+                            playSfx('click');
+                            setProcSortBy('usage');
+                          }}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: '11px',
+                            borderColor: procSortBy === 'usage' ? 'var(--color-success)' : 'var(--color-hairline-strong)',
+                            color: procSortBy === 'usage' ? 'var(--color-success)' : 'var(--color-mute)',
+                            textAlign: 'left'
+                          }}
+                        >
+                          {procSortBy === 'usage' ? '[+] BY USAGE' : '[ ] BY USAGE'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <button 
                     className="btn-tui"
                     onClick={() => { playSfx('click'); setShowGraph(!showGraph); }}
@@ -1322,7 +1395,12 @@ export default function Dashboard() {
                   </thead>
                   <tbody>
                     {[...runningProcesses]
-                      .sort((a, b) => renderedPanel === 'cpu' ? b.cpu_usage - a.cpu_usage : b.memory_mb - a.memory_mb)
+                      .sort((a, b) => {
+                        if (procSortBy === 'name') {
+                          return a.name.localeCompare(b.name);
+                        }
+                        return renderedPanel === 'cpu' ? b.cpu_usage - a.cpu_usage : b.memory_mb - a.memory_mb;
+                      })
                       .slice(0, 100) // Render top 100 to keep it snappy
                       .map((p, idx) => (
                       <tr key={idx}>
@@ -1472,26 +1550,93 @@ export default function Dashboard() {
                   outline: 'none'
                 }}
               />
-              <select
-                value={opFilter}
-                onClick={() => playSfx('click')}
-                onChange={e => setOpFilter(e.target.value)}
-                style={{
-                  background: 'var(--color-surface-elevated)',
-                  border: '1px solid var(--color-hairline)',
-                  borderRadius: '4px',
-                  color: 'var(--color-on-canvas)',
-                  padding: '6px 12px',
-                  fontFamily: 'inherit',
-                  fontSize: '12px',
-                  outline: 'none'
-                }}
-              >
-                <option value="ALL">ALL OPERATIONS</option>
-                <option value="CREATE">CREATE ONLY</option>
-                <option value="MODIFY">MODIFY ONLY</option>
-                <option value="DELETE">DELETE ONLY</option>
-              </select>
+              <div style={{ position: 'relative' }}>
+                <button
+                  className="btn-tui"
+                  onClick={() => { playSfx('click'); setShowTagsMenu(!showTagsMenu); }}
+                  style={{ padding: '4px 8px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
+                    <line x1="7" y1="7" x2="7.01" y2="7"></line>
+                  </svg>
+                  TAGS
+                </button>
+                {showTagsMenu && (
+                  <div className="tags-dropdown" style={{
+                    position: 'absolute',
+                    top: '100%',
+                    left: '50%',
+                    marginTop: '8px',
+                    backgroundColor: 'var(--color-surface-elevated)',
+                    border: '1px solid var(--color-hairline)',
+                    borderRadius: '4px',
+                    padding: '8px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                    zIndex: 100,
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                    minWidth: '120px'
+                  }}>
+                    {['CREATE', 'MODIFY', 'DELETE'].map(op => {
+                      const state = tagStates[op];
+                      let color = 'var(--color-mute)';
+                      let border = 'var(--color-hairline-strong)';
+                      let text = `[ ] ${op}`;
+                      if (state === 1) {
+                        color = 'var(--color-success)';
+                        border = 'var(--color-success)';
+                        text = `[+] ${op}`;
+                      } else if (state === -1) {
+                        color = 'var(--color-danger)';
+                        border = 'var(--color-danger)';
+                        text = `[-] ${op}`;
+                      }
+                      
+                      return (
+                        <button
+                          key={op}
+                          className="btn-tui"
+                          onClick={() => {
+                            playSfx('click');
+                            setTagStates(prev => ({
+                              ...prev,
+                              [op]: prev[op] === 0 ? 1 : prev[op] === 1 ? -1 : 0
+                            }));
+                          }}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: '11px',
+                            borderColor: border,
+                            color: color,
+                            textAlign: 'left'
+                          }}
+                        >
+                          {text}
+                        </button>
+                      );
+                    })}
+                    <div style={{ height: '1px', backgroundColor: 'var(--color-hairline)', margin: '2px 0' }} />
+                    <button
+                      className="btn-tui"
+                      onClick={() => {
+                        playSfx('click');
+                        setTagStates({ CREATE: 0, MODIFY: 0, DELETE: 0 });
+                      }}
+                      style={{
+                        padding: '4px 8px',
+                        fontSize: '11px',
+                        borderColor: Object.values(tagStates).every(v => v === 0) ? 'var(--color-success)' : 'var(--color-hairline-strong)',
+                        color: Object.values(tagStates).every(v => v === 0) ? 'var(--color-success)' : 'var(--color-mute)',
+                        textAlign: 'left'
+                      }}
+                    >
+                      {Object.values(tagStates).every(v => v === 0) ? '[+] ALL' : '[ ] ALL'}
+                    </button>
+                  </div>
+                )}
+              </div>
               
               {/* Tree Controls */}
               <div style={{ display: 'flex', gap: '8px', padding: '0 4px' }}>
@@ -1828,9 +1973,46 @@ export default function Dashboard() {
               </div>
 
               {/* Wipe Cache & Manual Sync Controls */}
-              <div style={{ display: 'flex', gap: '12px' }}>
+              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
                 <button onClick={() => { playSfx('click'); refreshData(); }} className="btn-tui">
                   [+] Manual DB Sync
+                </button>
+                <button onClick={async () => {
+                  playSfx('click');
+                  try {
+                    if (window.showSaveFilePicker) {
+                      const handle = await window.showSaveFilePicker({
+                        suggestedName: `AET_export_${Date.now()}.json`,
+                        types: [{
+                          description: 'JSON Files',
+                          accept: { 'application/json': ['.json'] },
+                        }],
+                      });
+                      const writable = await handle.createWritable();
+                      const events = await invoke('get_file_events');
+                      const jsonStr = JSON.stringify(events, null, 2);
+                      await writable.write(jsonStr);
+                      await writable.close();
+                      return;
+                    }
+                    
+                    // Fallback if File System Access API is not available
+                    const events = await invoke('get_file_events');
+                    const jsonStr = JSON.stringify(events, null, 2);
+                    const blob = new Blob([jsonStr], { type: "application/json" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `AET_export_${Date.now()}.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (e) {
+                    if (e.name !== 'AbortError') {
+                      console.error("Export failed", e);
+                    }
+                  }
+                }} className="btn-tui">
+                  [+] Export DB to JSON
                 </button>
                 <button onClick={() => { playSfx('click'); handleClearLogs(); }} className="btn-tui" style={{ borderColor: '#ff3b30', color: '#ff3b30' }}>
                   [x] Wipe Database &amp; Clean Cache
