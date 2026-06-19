@@ -1,6 +1,5 @@
 mod sidecar;
 mod database;
-mod activation;
 
 use tauri::Manager;
 
@@ -30,10 +29,7 @@ pub fn run() {
         database::get_ignore_system_apps,
         database::set_ignore_system_apps,
         database::exit_app,
-        database::get_db_size,
-        activation::get_machine_id,
-        activation::verify_activation_code,
-        activation::is_activated
+        database::get_db_size
     ])
     .setup(|app| {
         // Tray Setup
@@ -75,10 +71,18 @@ pub fn run() {
 
         // Initialize SQLite tables in Rust on startup to prevent UI race conditions
         if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+            // Check if schema update is needed (i.e. process_name column is missing in file_events)
+            let needs_reset = conn.execute("SELECT process_name FROM file_events LIMIT 1", []).is_err();
+            if needs_reset {
+                let _ = conn.execute("DROP TABLE IF EXISTS file_events", []);
+                let _ = conn.execute("DROP TABLE IF EXISTS monitored_apps", []);
+            }
+
             let _ = conn.execute(
                 "CREATE TABLE IF NOT EXISTS monitored_apps (
-                    pid INTEGER PRIMARY KEY,
-                    process_name TEXT NOT NULL,
+                    process_name TEXT PRIMARY KEY,
+                    pid INTEGER NOT NULL,
                     executable_path TEXT,
                     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -90,9 +94,9 @@ pub fn run() {
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     pid INTEGER,
+                    process_name TEXT,
                     file_path TEXT NOT NULL,
-                    operation_type TEXT NOT NULL,
-                    FOREIGN KEY(pid) REFERENCES monitored_apps(pid) ON DELETE SET NULL
+                    operation_type TEXT NOT NULL
                 )",
                 [],
             );

@@ -66,7 +66,9 @@ pub struct FileEventInfo {
 }
 
 fn get_conn(db_path: &str) -> Result<Connection> {
-    Connection::open(db_path)
+    let conn = Connection::open(db_path)?;
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    Ok(conn)
 }
 
 #[tauri::command]
@@ -79,9 +81,8 @@ pub fn get_file_events(state: tauri::State<'_, AppPaths>) -> Result<Vec<FileEven
     let conn = get_conn(&state.db_path).map_err(|e| e.to_string())?;
     
     let mut stmt = conn.prepare(
-        "SELECT e.event_id, e.timestamp, e.pid, a.process_name, e.file_path, e.operation_type \
+        "SELECT e.event_id, e.timestamp, e.pid, e.process_name, e.file_path, e.operation_type \
          FROM file_events e \
-         LEFT JOIN monitored_apps a ON e.pid = a.pid \
          ORDER BY e.timestamp DESC LIMIT 1000"
     ).map_err(|e| e.to_string())?;
 
@@ -111,10 +112,9 @@ pub fn get_all_unique_files(state: tauri::State<'_, AppPaths>) -> Result<Vec<Fil
     
     // SQLite grouping to perfectly deduplicate thousands of repetitive file logs!
     let mut stmt = conn.prepare(
-        "SELECT e.event_id, MAX(e.timestamp) as timestamp, e.pid, a.process_name, e.file_path, e.operation_type \
+        "SELECT e.event_id, MAX(e.timestamp) as timestamp, e.pid, e.process_name, e.file_path, e.operation_type \
          FROM file_events e \
-         LEFT JOIN monitored_apps a ON e.pid = a.pid \
-         GROUP BY a.process_name, e.file_path \
+         GROUP BY e.process_name, e.file_path \
          ORDER BY timestamp DESC LIMIT 5000"
     ).map_err(|e| e.to_string())?;
 

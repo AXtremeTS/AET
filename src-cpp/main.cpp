@@ -35,10 +35,13 @@ const GUID ProcessGuid = { 0x3d6fa8d0, 0xfe05, 0x11d0, { 0x9d, 0xda, 0x00, 0xc0,
 struct ProcessInfo {
     std::string name;
     std::string exe;
+    HANDLE hProcess = NULL;
+    uint64_t exitTime = 0;
 };
 
 std::map<ULONG64, std::wstring> g_fileObjectMap;
 std::map<DWORD, ProcessInfo> g_procInfoMap;
+std::mutex g_procMutex;
 std::map<std::wstring, uint64_t> g_dedupCache;
 
 std::set<std::wstring> g_watchTargets;
@@ -116,15 +119,16 @@ std::string GetProcessNameFromToolhelp(DWORD pid) {
 }
 
 ProcessInfo GetProcInfo(DWORD pid) {
-    if (pid == 0) return { "System Idle Process", "" };
-    if (pid == 4) return { "System", "" };
+    if (pid == 0) return { "System Idle Process", "", NULL, 0 };
+    if (pid == 4) return { "System", "", NULL, 0 };
 
+    std::lock_guard<std::mutex> lock(g_procMutex);
     if (g_procInfoMap.count(pid)) {
         return g_procInfoMap[pid];
     }
 
-    ProcessInfo info = { "Unknown", "" };
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    ProcessInfo info = { "Unknown", "", NULL, 0 };
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
     if (hProcess) {
         char name[MAX_PATH];
         DWORD size = MAX_PATH;
@@ -132,8 +136,10 @@ ProcessInfo GetProcInfo(DWORD pid) {
             info.exe = name;
             size_t pos = info.exe.find_last_of("\\/");
             info.name = (pos != std::string::npos) ? info.exe.substr(pos + 1) : info.exe;
+            info.hProcess = hProcess;
+        } else {
+            CloseHandle(hProcess);
         }
-        CloseHandle(hProcess);
     }
     
     // Fallback using Toolhelp32 snapshot if OpenProcess/QueryImage fails (works for protected/elevated apps)
@@ -146,6 +152,12 @@ ProcessInfo GetProcInfo(DWORD pid) {
         }
     }
     
+    // Unconditionally cache the result (even if "Unknown" or "PID xxxx") to avoid spamming snapshots
+    if (info.hProcess == NULL) {
+        info.exitTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+    }
     g_procInfoMap[pid] = info;
     return info;
 }
@@ -284,14 +296,59 @@ void WINAPI EventRecordCallback(PEVENT_RECORD pEvent) {
         if (opcode == 1 || opcode == 3) {
             DWORD targetPid = GetPropertyPointer(pEvent, L"ProcessId");
             if (targetPid != 0) {
-                g_procInfoMap.erase(targetPid); // Invalidate cache
-                GetProcInfo(targetPid); // Force fresh cache fetch via OpenProcess
+                std::lock_guard<std::mutex> lock(g_procMutex);
+                if (g_procInfoMap.count(targetPid)) {
+                    if (g_procInfoMap[targetPid].hProcess) {
+                        CloseHandle(g_procInfoMap[targetPid].hProcess);
+                    }
+                    g_procInfoMap.erase(targetPid); // Invalidate cache
+                }
+
+                // Immediately resolve and cache process details to prevent lag on first file I/O
+                ProcessInfo info = { "Unknown", "", NULL, 0 };
+                HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, targetPid);
+                if (hProcess) {
+                    char name[MAX_PATH];
+                    DWORD size = MAX_PATH;
+                    if (QueryFullProcessImageNameA(hProcess, 0, name, &size)) {
+                        info.exe = name;
+                        size_t pos = info.exe.find_last_of("\\/");
+                        info.name = (pos != std::string::npos) ? info.exe.substr(pos + 1) : info.exe;
+                        info.hProcess = hProcess;
+                    } else {
+                        CloseHandle(hProcess);
+                    }
+                }
+                
+                if (info.name == "Unknown") {
+                    std::string toolhelpName = GetProcessNameFromToolhelp(targetPid);
+                    if (!toolhelpName.empty()) {
+                        info.name = toolhelpName;
+                    } else {
+                        info.name = "PID " + std::to_string(targetPid);
+                    }
+                }
+                
+                if (info.hProcess == NULL) {
+                    info.exitTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count();
+                }
+                
+                g_procInfoMap[targetPid] = info;
             }
         }
         // Process_End (2) or Process_DCEnd (4)
         else if (opcode == 2 || opcode == 4) {
-            // Keep the cache for exited processes! This prevents late-flushed events 
-            // from falling back to "PID XXXX" names when QueryImage fails for dead processes.
+            DWORD targetPid = GetPropertyPointer(pEvent, L"ProcessId");
+            if (targetPid != 0) {
+                std::lock_guard<std::mutex> lock(g_procMutex);
+                if (g_procInfoMap.count(targetPid)) {
+                    g_procInfoMap[targetPid].exitTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count();
+                }
+            }
         }
     }
     else if (IsEqualGUID(pEvent->EventHeader.ProviderId, FileIoGuid)) {
@@ -327,6 +384,55 @@ void WINAPI EventRecordCallback(PEVENT_RECORD pEvent) {
             }
         }
     }
+}
+
+DWORD WINAPI CacheCleanupThread(LPVOID lpParam) {
+    while (true) {
+        Sleep(2000); // Check for exited processes every 2 seconds
+        
+        uint64_t currentMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+        
+        std::vector<DWORD> pidsToRemove;
+        {
+            std::lock_guard<std::mutex> lock(g_procMutex);
+            for (auto& pair : g_procInfoMap) {
+                DWORD pid = pair.first;
+                auto& info = pair.second;
+                
+                if (info.hProcess) {
+                    DWORD exitCode = 0;
+                    if (GetExitCodeProcess(info.hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
+                        if (info.exitTime == 0) {
+                            info.exitTime = currentMs;
+                        }
+                    }
+                    
+                    // Keep process in cache for 5 seconds after exit to allow late events to resolve
+                    if (info.exitTime != 0 && (currentMs - info.exitTime) > 5000) {
+                        pidsToRemove.push_back(pid);
+                    }
+                } else {
+                    // Fallback entries (no handle held). Keep in cache for 5 seconds to throttle snapshot spam
+                    if (info.exitTime == 0) {
+                        info.exitTime = currentMs;
+                    }
+                    if (currentMs - info.exitTime > 5000) {
+                        pidsToRemove.push_back(pid);
+                    }
+                }
+            }
+            
+            for (DWORD pid : pidsToRemove) {
+                if (g_procInfoMap[pid].hProcess) {
+                    CloseHandle(g_procInfoMap[pid].hProcess);
+                }
+                g_procInfoMap.erase(pid);
+            }
+        }
+    }
+    return 0;
 }
 
 DWORD WINAPI ParseStdinThread(LPVOID lpParam) {
@@ -397,6 +503,7 @@ int main(int argc, char* argv[]) {
     InitializeDeviceMap();
 
     CreateThread(NULL, 0, ParseStdinThread, NULL, 0, NULL);
+    CreateThread(NULL, 0, CacheCleanupThread, NULL, 0, NULL);
 
     ULONG bufferSize = sizeof(EVENT_TRACE_PROPERTIES) + sizeof(KERNEL_LOGGER_NAMEW) + MAX_PATH * sizeof(WCHAR);
     PEVENT_TRACE_PROPERTIES pProperties = (PEVENT_TRACE_PROPERTIES)malloc(bufferSize);

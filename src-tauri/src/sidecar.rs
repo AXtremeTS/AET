@@ -141,13 +141,16 @@ pub fn spawn_etw_process(app_handle: AppHandle, db_path: String) {
             loop {
                 std::thread::sleep(Duration::from_secs(300)); // Every 5 minutes
                 if let Ok(conn) = rusqlite::Connection::open(&db_path_cleanup) {
+                    let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
                     let _ = conn.execute("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;", []);
-                    let _ = conn.execute(
+                    if let Err(e) = conn.execute(
                         "DELETE FROM file_events WHERE event_id NOT IN (
                             SELECT event_id FROM file_events ORDER BY event_id DESC LIMIT 10000
                         )",
                         [],
-                    );
+                    ) {
+                        log::error!("Failed database cleanup: {}", e);
+                    }
                 }
             }
         });
@@ -173,6 +176,7 @@ pub fn spawn_etw_process(app_handle: AppHandle, db_path: String) {
         let reader = BufReader::new(stdout);
         let db_conn = rusqlite::Connection::open(&db_path).ok();
         if let Some(conn) = &db_conn {
+            let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
             let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;");
         }
 
@@ -191,28 +195,42 @@ pub fn spawn_etw_process(app_handle: AppHandle, db_path: String) {
                             let executable_path = data["executable_path"].as_str().unwrap_or("");
                             
                             if let Some(conn) = &db_conn {
-                                // Insert app if not exists
-                                let _ = conn.execute(
-                                    "INSERT OR IGNORE INTO monitored_apps (pid, process_name, executable_path) VALUES (?1, ?2, ?3)",
-                                    rusqlite::params![pid, process_name, executable_path],
+                                // Insert app if not exists, or update it using process_name as primary key
+                                let exists: Result<i32, _> = conn.query_row(
+                                    "SELECT 1 FROM monitored_apps WHERE process_name = ?1",
+                                    rusqlite::params![process_name],
+                                    |row| row.get(0),
                                 );
-                                // Update executable_path and last_seen
-                                if !executable_path.is_empty() {
-                                    let _ = conn.execute(
-                                        "UPDATE monitored_apps SET executable_path = ?1, last_seen = CURRENT_TIMESTAMP WHERE pid = ?2",
-                                        rusqlite::params![executable_path, pid],
-                                    );
+                                if exists.is_ok() {
+                                    let update_res = if !executable_path.is_empty() {
+                                        conn.execute(
+                                            "UPDATE monitored_apps SET pid = ?1, executable_path = ?2, last_seen = CURRENT_TIMESTAMP WHERE process_name = ?3",
+                                            rusqlite::params![pid, executable_path, process_name],
+                                        )
+                                    } else {
+                                        conn.execute(
+                                            "UPDATE monitored_apps SET pid = ?1, last_seen = CURRENT_TIMESTAMP WHERE process_name = ?2",
+                                            rusqlite::params![pid, process_name],
+                                        )
+                                    };
+                                    if let Err(e) = update_res {
+                                        log::error!("Failed to update monitored app registry: {}", e);
+                                    }
                                 } else {
-                                    let _ = conn.execute(
-                                        "UPDATE monitored_apps SET last_seen = CURRENT_TIMESTAMP WHERE pid = ?1",
-                                        rusqlite::params![pid],
-                                    );
+                                    if let Err(e) = conn.execute(
+                                        "INSERT INTO monitored_apps (process_name, pid, executable_path) VALUES (?1, ?2, ?3)",
+                                        rusqlite::params![process_name, pid, executable_path],
+                                    ) {
+                                        log::error!("Failed to insert monitored app registry: {}", e);
+                                    }
                                 }
-                                // Insert file event
-                                let _ = conn.execute(
-                                    "INSERT INTO file_events (timestamp, pid, file_path, operation_type) VALUES (?1, ?2, ?3, ?4)",
-                                    rusqlite::params![timestamp, pid, file_path, operation_type],
-                                );
+                                // Insert file event with process_name directly
+                                if let Err(e) = conn.execute(
+                                    "INSERT INTO file_events (timestamp, pid, process_name, file_path, operation_type) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                    rusqlite::params![timestamp, pid, process_name, file_path, operation_type],
+                                ) {
+                                    log::error!("Failed to insert file event into SQLite: {}", e);
+                                }
                             }
                         }
                     }

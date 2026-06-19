@@ -600,6 +600,27 @@ export default function Dashboard() {
         const payload = event.payload;
         if (payload.event_type === 'FILE_CHANGE') {
           setFileEvents((prev) => [payload.data, ...prev].slice(0, 2500));
+          setAllFilesHistory((prev) => {
+            const existingIdx = prev.findIndex(e => 
+              e.process_name === payload.data.process_name && 
+              e.file_path === payload.data.file_path
+            );
+            const updatedEvent = {
+              event_id: payload.data.event_id || Date.now(),
+              timestamp: payload.data.timestamp,
+              pid: payload.data.pid,
+              process_name: payload.data.process_name,
+              file_path: payload.data.file_path,
+              operation_type: payload.data.operation_type
+            };
+            if (existingIdx > -1) {
+              const next = [...prev];
+              next.splice(existingIdx, 1);
+              return [updatedEvent, ...next];
+            } else {
+              return [updatedEvent, ...prev];
+            }
+          });
         } else if (payload.event_type === 'SYSTEM') {
           setSystemLogs((prev) => [...prev, payload.data]);
         }
