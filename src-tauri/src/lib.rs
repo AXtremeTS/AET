@@ -1,5 +1,6 @@
 mod sidecar;
 mod database;
+mod activation;
 
 use tauri::Manager;
 
@@ -29,7 +30,10 @@ pub fn run() {
         database::get_ignore_system_apps,
         database::set_ignore_system_apps,
         database::exit_app,
-        database::get_db_size
+        database::get_db_size,
+        activation::get_machine_id,
+        activation::verify_activation_code,
+        activation::is_activated
     ])
     .setup(|app| {
         // Tray Setup
