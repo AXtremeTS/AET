@@ -1,0 +1,35 @@
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Rust/Tauri
+src-tauri/target/
+src-tauri/Cargo.lock
+src-tauri/bin/
+
+# Java
+target/
+*.class
+*.jar
+*.log
+src-java/target/
+
+# Databases
+shared.db
+*.db
+
+# Ignore specific root markdown files but allow README.md
+/*.md
+!/README.md
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
