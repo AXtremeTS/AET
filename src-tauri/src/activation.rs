@@ -36,14 +36,7 @@ pub async fn verify_activation_code(
     let client = Client::new();
     let supabase_url = get_supabase_url();
     let supabase_key = get_supabase_key();
-    
-    // Check local cache first
     let act_file = get_activation_file(&app);
-    if let Ok(cached_code) = fs::read_to_string(&act_file) {
-        if cached_code.trim() == code.trim() {
-            return Ok(true);
-        }
-    }
 
     // Call Supabase REST API
     let endpoint = format!("{}/rest/v1/activation_codes?code=eq.{}&select=*", supabase_url, code);
@@ -83,11 +76,25 @@ pub async fn verify_activation_code(
 }
 
 #[tauri::command]
-pub fn is_activated(app: AppHandle) -> bool {
+pub async fn is_activated(app: AppHandle) -> Result<bool, String> {
     let act_file = get_activation_file(&app);
-    if let Ok(cached_code) = fs::read_to_string(&act_file) {
-        !cached_code.trim().is_empty()
-    } else {
-        false
+    let cached_code = match fs::read_to_string(&act_file) {
+        Ok(code) => code.trim().to_string(),
+        Err(_) => return Ok(false),
+    };
+    
+    if cached_code.is_empty() {
+        return Ok(false);
+    }
+    
+    // Call Supabase with the cached code
+    let res = verify_activation_code(app.clone(), cached_code.clone()).await;
+    match res {
+        Ok(true) => Ok(true),
+        _ => {
+            // If it failed verification (e.g. key no longer active), delete the local cache
+            let _ = fs::remove_file(&act_file);
+            Ok(false)
+        }
     }
 }
